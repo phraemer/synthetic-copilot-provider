@@ -35,6 +35,14 @@ const SyntheticModelDetailsSchema = z.object({
 	// Synthetic specific params
 	always_on: z.boolean().optional(),
 	provider: z.string(),
+	categories: z.array(z.string()).optional(),
+	display_name: z.string().optional(),
+	reasoning_parameters: z
+		.object({
+			efforts: z.array(z.string()).optional(),
+		})
+		.passthrough()
+		.optional(),
 
 	// Required OpenRouter params
 	id: z.string(),
@@ -61,7 +69,7 @@ const SyntheticModelDetailsSchema = z.object({
 	// so an unrecognized label never fails the entire model list.
 	quantization: QuantizationSpec.or(z.string()).optional(),
 	supported_sampling_parameters: z.array(SamplingParameterSpec).optional(),
-	supported_features: z.array(ModelFeatureSpec).optional(),
+	supported_features: z.array(ModelFeatureSpec.or(z.string())).optional(),
 
 	// Opetional OpenRouter params.
 	description: z.string().optional(),

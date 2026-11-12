@@ -2,6 +2,7 @@ import * as assert from "assert";
 import * as vscode from "vscode";
 
 import { convertRequestToOpenAI } from "../utils";
+import { SyntheticChatModelProvider } from "../provider";
 
 interface OpenAIToolCall {
 	id: string;
@@ -249,6 +250,27 @@ suite("Synthetic Chat Provider Extension", () => {
 			);
 
 			assert.strictEqual(result, 44, "Should return fixed token count for message");
+		});
+	});
+
+	suite("change notification", () => {
+		test("refresh fires onDidChangeLanguageModelChatInformation", () => {
+			const secrets = {
+				get: async () => undefined,
+				store: async () => {},
+				delete: async () => {},
+				onDidChange: () => ({ dispose: () => {} })
+			} as unknown as vscode.SecretStorage;
+
+			const provider = new SyntheticChatModelProvider(secrets, "test-user-agent");
+			let fired = 0;
+			const subscription = provider.onDidChangeLanguageModelChatInformation(() => fired++);
+
+			provider.refresh();
+
+			subscription.dispose();
+			provider.dispose();
+			assert.strictEqual(fired, 1, "refresh should fire the change event once");
 		});
 	});
 

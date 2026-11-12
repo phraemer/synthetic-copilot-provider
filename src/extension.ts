@@ -3,24 +3,37 @@ import { SyntheticChatModelProvider } from "./provider";
 import { showTemperatureConfigUI } from "./config";
 
 export async function activate(context: vscode.ExtensionContext) {
-	// Build a descriptive User-Agent to help quantify API usage
-	const ext = vscode.extensions.getExtension("synthetic-vscode-chat");
-	const extVersion = ext?.packageJSON?.version ?? "unknown";
-	const vscodeVersion = vscode.version;
-	// Keep UA minimal: only extension version and VS Code version
-	const ua = `synthetic-vscode-chat/${extVersion} VSCode/${vscodeVersion}`;
+	// Build a descriptive User-Agent to help quantify API usage.
+	// Keep UA minimal: only extension id/version and VS Code version.
+	const extVersion = context.extension.packageJSON.version ?? "unknown";
+	const ua = `${context.extension.id}/${extVersion} VSCode/${vscode.version}`;
 
 	const provider = new SyntheticChatModelProvider(context.secrets, ua);
+	context.subscriptions.push(provider);
 
 	// Register the Synthetic provider under the vendor id used in package.json
-	vscode.lm.registerLanguageModelChatProvider("synthetic", provider);
+	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider("synthetic", provider));
 
-	// Prefetch models in the BACKGROUND (non-blocking).
-	// If VS Code calls provideLanguageModelChatInformation before prefetch completes,
-	// the fetch lock ensures only one fetch runs and both paths wait for the same result.
-	provider.prefetchModels().catch((err) => {
-		console.warn("[Synthetic Model Provider] Model prefetch failed (will retry on demand):", err);
-	});
+	// Prefetch models in the BACKGROUND (non-blocking), then notify VS Code.
+	// VS Code caches the models it resolves for a provider, and the agent-host
+	// BYOK bridge only reads that cache. Firing onDidChangeLanguageModelChatInformation
+	// makes VS Code resolve us immediately, so the provider shows up in the model
+	// picker and agent-host sessions without first opening Manage Models.
+	provider
+		.prefetchModels()
+		.catch((err) => {
+			console.warn("[Synthetic Model Provider] Model prefetch failed (will retry on demand):", err);
+		})
+		.finally(() => provider.refresh());
+
+	// Keep multiple VS Code windows in sync when the key is changed elsewhere.
+	context.subscriptions.push(
+		context.secrets.onDidChange((event) => {
+			if (event.key === "synthetic.apiKey") {
+				provider.refresh();
+			}
+		})
+	);
 
 	// Management command to configure API key
 	context.subscriptions.push(
@@ -38,10 +51,12 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 			if (!apiKey.trim()) {
 				await context.secrets.delete("synthetic.apiKey");
+				provider.refresh();
 				vscode.window.showInformationMessage("Synthetic API key cleared.");
 				return;
 			}
 			await context.secrets.store("synthetic.apiKey", apiKey.trim());
+			provider.refresh();
 			vscode.window.showInformationMessage("Synthetic API key saved.");
 		})
 	);

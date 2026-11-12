@@ -14,8 +14,29 @@ import { ThinkSegment, ThinkTagParser } from "./thinkParser";
 import { SyntheticModelsService, BASE_URL } from "./syntheticModels";
 import { getModelTemperature } from "./config";
 
-export class SyntheticChatModelProvider implements LanguageModelChatProvider {
+export class SyntheticChatModelProvider implements LanguageModelChatProvider, vscode.Disposable {
 	private _modelsService: SyntheticModelsService;
+	private readonly _onDidChangeLanguageModelChatInformation = new vscode.EventEmitter<void>();
+
+	/**
+	 * Fired when the available models change. VS Code uses this event to
+	 * re-resolve the provider's models; the agent-host BYOK bridge only reads
+	 * models that have already been resolved and cached, so firing this during
+	 * activation is what makes the provider visible there.
+	 */
+	readonly onDidChangeLanguageModelChatInformation = this._onDidChangeLanguageModelChatInformation.event;
+
+	/**
+	 * Ask VS Code to re-resolve this provider's models.
+	 */
+	refresh(): void {
+		this._onDidChangeLanguageModelChatInformation.fire();
+	}
+
+	dispose(): void {
+		this._onDidChangeLanguageModelChatInformation.dispose();
+	}
+
 	/**
 	 * Create a provider using the given secret storage for the API key.
 	 * @param secrets VS Code secret storage.
@@ -68,7 +89,10 @@ export class SyntheticChatModelProvider implements LanguageModelChatProvider {
 		progress: Progress<LanguageModelResponsePart>,
 		token: CancellationToken
 	): Promise<void> {
-		const apiKey = await this._modelsService.ensureApiKey(this.secrets, true);
+		// Prompt for a key on first use if the user has not configured one yet.
+		// Model discovery does not need a key, so this is often the first time
+		// the user is asked for credentials.
+		const apiKey = await this._modelsService.ensureApiKey(this.secrets, false);
 		if (!apiKey) {
 			throw new Error("Synthetic API key not found");
 		}

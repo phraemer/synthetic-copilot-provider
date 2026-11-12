@@ -192,24 +192,156 @@ suite("Synthetic Models Service Tests", () => {
 
 	test("should prepare language model chat information with no API key", async () => {
 		const mockSecrets = {
-			get: async (key: string) => undefined,
-			store: async (key: string, value: string) => {},
-			delete: async (key: string) => {},
-			onDidChange: {
-				// @ts-ignore - Mock event emitter
-				dispose: () => {}
-			}
+			get: async (_key: string) => undefined,
+			store: async (_key: string, _value: string) => {},
+			delete: async (_key: string) => {},
+			onDidChange: () => ({ dispose: () => {} })
 		} as unknown as vscode.SecretStorage;
 
-		const mockToken = new vscode.CancellationTokenSource().token;
+		const originalFetch = global.fetch;
+		global.fetch = async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url.endsWith("/models")) {
+				return {
+					ok: true,
+					json: async () => ({
+						data: [
+							{
+								id: "hf:openai/gpt-oss-120b",
+								name: "hf:openai/gpt-oss-120b",
+								provider: "synthetic",
+								input_modalities: ["text"],
+								output_modalities: ["text"],
+								context_length: 131072,
+								max_output_length: 65536,
+								supported_features: ["tools", "reasoning"]
+							}
+						]
+					})
+				} as Response;
+			}
+			return {
+				ok: true,
+				json: async () => ({ synthetic: { models: {} } })
+			} as Response;
+		};
 
-		const result = await modelsService.prepareLanguageModelChatInformation(
-			mockSecrets,
-			{ silent: true },
-			mockToken
-		);
+		try {
+			const mockToken = new vscode.CancellationTokenSource().token;
 
-		assert.deepStrictEqual(result, [], "Should return empty array when no API key is available");
+			const result = await modelsService.prepareLanguageModelChatInformation(
+				mockSecrets,
+				{ silent: true },
+				mockToken
+			);
+
+			assert.strictEqual(result.length, 1, "Models should be discovered without an API key");
+			assert.strictEqual(result[0].id, "hf:openai/gpt-oss-120b");
+			assert.strictEqual(result[0].capabilities.toolCalling, true, "API capabilities should mark tools as supported");
+			assert.strictEqual(result[0].maxInputTokens, 131072, "API context length should be used");
+			assert.strictEqual(result[0].maxOutputTokens, 65536, "API max output length should be used");
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	test("should use API capabilities and fall back to models.dev for aliases", async () => {
+		const mockSecrets = {
+			get: async (_key: string) => undefined,
+			store: async (_key: string, _value: string) => {},
+			delete: async (_key: string) => {},
+			onDidChange: () => ({ dispose: () => {} })
+		} as unknown as vscode.SecretStorage;
+
+		const originalFetch = global.fetch;
+		global.fetch = async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url.endsWith("/models")) {
+				return {
+					ok: true,
+					json: async () => ({
+						data: [
+							{
+								id: "syn:large:text",
+								name: "syn:large:text",
+								display_name: "syn:large:text",
+								hugging_face_id: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+								provider: "synthetic",
+								input_modalities: ["text", "image"],
+								output_modalities: ["text"],
+								context_length: 524288,
+								max_output_length: 65536,
+								supported_features: ["tools", "reasoning"],
+								reasoning_parameters: { efforts: ["low", "high"] }
+							}
+						]
+					})
+				} as Response;
+			}
+			return {
+				ok: true,
+				json: async () => ({
+					synthetic: {
+						models: {
+							"hf:deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+								id: "hf:deepseek-ai/DeepSeek-V4.1-Flash-1017",
+								name: "DeepSeek V4.1 Flash 1017",
+								attachment: true,
+								reasoning: true,
+								temperature: true,
+								tool_call: true,
+								modalities: { input: ["text", "image"], output: ["text"] },
+								open_weights: true,
+								cost: { input: 0.6, output: 1.2 },
+								limit: { context: 524288, output: 65536 }
+							}
+						}
+					}
+				})
+			} as Response;
+		};
+
+		try {
+			const result = await modelsService.prepareLanguageModelChatInformation(
+				mockSecrets,
+				{ silent: true },
+				new vscode.CancellationTokenSource().token
+			);
+
+			assert.strictEqual(result.length, 1);
+			assert.strictEqual(result[0].name, "syn:large:text", "Category aliases should keep their unique id as the name");
+			assert.match(result[0].detail ?? "", /routes to DeepSeek V4\.1 Flash 1017/, "Detail should explain alias routing");
+			assert.match(result[0].tooltip ?? "", /category alias for DeepSeek V4\.1 Flash 1017/, "Tooltip should explain alias routing");
+			assert.strictEqual(result[0].capabilities.toolCalling, true);
+			assert.strictEqual(result[0].capabilities.imageInput, true);
+			assert.strictEqual((result[0].capabilities as { supportsThinking?: boolean }).supportsThinking, true);
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	test("should not send Authorization when no API key is available", async () => {
+		const originalFetch = global.fetch;
+		let authorization: string | undefined;
+		global.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+			authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+			return {
+				ok: true,
+				json: async () => ({ data: [{ id: "m", name: "m", provider: "synthetic", input_modalities: ["text"], output_modalities: ["text"] }] })
+			} as Response;
+		};
+
+		try {
+			// Use separate services so the in-memory models cache does not skip the
+			// second fetch.
+			await new SyntheticModelsService("test-user-agent").fetchModels(undefined);
+			assert.strictEqual(authorization, undefined, "Should not send Authorization without a key");
+
+			await new SyntheticModelsService("test-user-agent").fetchModels("test-key");
+			assert.strictEqual(authorization, "Bearer test-key", "Should send Authorization when a key is provided");
+		} finally {
+			global.fetch = originalFetch;
+		}
 	});
 
 	test("should handle network errors in hydrateModelId", async () => {

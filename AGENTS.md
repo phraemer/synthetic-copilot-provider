@@ -95,6 +95,12 @@ The `SyntheticChatModelProvider` implements `LanguageModelChatProvider` interfac
 - Handles chat requests and streaming responses
 - Manages API authentication and model fetching
 - Converts between VS Code and OpenAI API formats
+- Fires `onDidChangeLanguageModelChatInformation` after activation and whenever credentials change. VS Code caches resolved models per provider, and the agent-host BYOK bridge only reads that cache, so without this event the provider can be missing from the Agents window / Copilot harness.
+
+### Model Discovery
+- Synthetic's `GET /openai/v1/models` endpoint is public; the extension lists models even when no API key is configured. The key is requested on the first chat request.
+- The Synthetic API is the source of truth for model capabilities (`supported_features`, `input_modalities`, `reasoning_parameters`) and limits (`context_length`, `max_output_length`). models.dev is only a fallback, looked up by model id and then by `hugging_face_id` for `syn:*` / `infinite:*` aliases.
+- The provider activation event is `onLanguageModelChatProvider:synthetic` (the old `onLanguageModelChat:synthetic` event was renamed in VS Code 1.104).
 
 ### Service Layer
 - `SyntheticModelsService` handles all Synthetic API interactions

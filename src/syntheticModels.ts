@@ -35,6 +35,9 @@ export class SyntheticModelsService {
 	private _modelDetailsCache: Record<string, SyntheticModelDevDetails> | null = null;
 	// Lock to prevent parallel fetches from models.dev
 	private _fetchingModelDetails: Promise<void> | null = null;
+	// Coalesce parallel model-list fetches (e.g. the startup prefetch racing a
+	// VS Code model resolution).
+	private _fetchingModels: Promise<{ models: SyntheticModelDetails[] }> | null = null;
 	// Cache for the list of models to avoid fetching on every request
 	private _modelsCache: { models: SyntheticModelDetails[]; fetchedAt: number } | null = null;
 	// Cache TTL (e.g., 5 minutes)
@@ -70,9 +73,27 @@ export class SyntheticModelsService {
 
 	/**
 	 * Fetch the list of models and supplementary metadata from Synthetic.
-	 * @param apiKey The Synthetic API key used to authenticate.
+	 * The models endpoint is public, so the API key is optional and only sent
+	 * when one is available.
+	 * @param apiKey The Synthetic API key used to authenticate, if available.
 	 */
-	async fetchModels(apiKey: string): Promise<{ models: SyntheticModelDetails[] }> {
+	async fetchModels(apiKey?: string): Promise<{ models: SyntheticModelDetails[] }> {
+		if (this._fetchingModels) {
+			return this._fetchingModels;
+		}
+
+		const promise = this._fetchModels(apiKey);
+		this._fetchingModels = promise;
+		try {
+			return await promise;
+		} finally {
+			if (this._fetchingModels === promise) {
+				this._fetchingModels = null;
+			}
+		}
+	}
+
+	private async _fetchModels(apiKey?: string): Promise<{ models: SyntheticModelDetails[] }> {
 		// Use cached models if still fresh (skip caching in test environment)
 		if (process.env.NODE_ENV !== "test") {
 			const now = Date.now();
@@ -88,7 +109,7 @@ export class SyntheticModelsService {
 			try {
 				response = await fetch(`${BASE_URL}/models`, {
 					headers: {
-						Authorization: `Bearer ${apiKey}`,
+						...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
 						"User-Agent": this.userAgent,
 					},
 					signal: controller.signal,
@@ -238,13 +259,19 @@ export class SyntheticModelsService {
 	/**
 	 * Hydrate model information using the model details from https://models.dev/api.json
 	 * @param modelId The model ID to hydrate
+	 * @param huggingFaceId Optional Hugging Face model ID used as a fallback lookup.
+	 *   Synthetic's friendly aliases (for example `syn:large:text`) are not listed
+	 *   in models.dev, but their underlying Hugging Face model is.
 	 * @returns The hydrated model information or null if not found or tool_call is false
 	 */
-	async hydrateModelId(modelId: string): Promise<Partial<import("vscode").LanguageModelChatInformation> | null> {
+	async hydrateModelId(
+		modelId: string,
+		huggingFaceId?: string
+	): Promise<Partial<import("vscode").LanguageModelChatInformation> | null> {
 		try {
 			// If cache is already populated, just build info directly
 			if (this._modelDetailsCache) {
-				return this._buildHydratedInfo(modelId);
+				return this._buildHydratedInfoWithFallback(modelId, huggingFaceId);
 			}
 
 			// Use a lock promise so parallel calls don't all race to fetch
@@ -257,12 +284,29 @@ export class SyntheticModelsService {
 			await this._fetchingModelDetails;
 			this._fetchingModelDetails = null;
 
-			return this._buildHydratedInfo(modelId);
+			return this._buildHydratedInfoWithFallback(modelId, huggingFaceId);
 		} catch (error) {
 			this._fetchingModelDetails = null;
 			console.error("[Synthetic Model Provider] Failed to hydrate model ID:", modelId, error);
 			return null;
 		}
+	}
+
+	private _buildHydratedInfoWithFallback(
+		modelId: string,
+		huggingFaceId?: string
+	): Partial<import("vscode").LanguageModelChatInformation> | null {
+		const direct = this._buildHydratedInfo(modelId);
+		if (direct) {
+			return direct;
+		}
+
+		if (!huggingFaceId) {
+			return null;
+		}
+
+		const fallbackId = huggingFaceId.startsWith("hf:") ? huggingFaceId : `hf:${huggingFaceId}`;
+		return fallbackId === modelId ? null : this._buildHydratedInfo(fallbackId);
 	}
 
 	/**
@@ -277,10 +321,11 @@ export class SyntheticModelsService {
 		options: { silent: boolean },
 		_token: CancellationToken
 	): Promise<LanguageModelChatInformation[]> {
-		const apiKey = await this.ensureApiKey(secrets, options.silent);
-		if (!apiKey) {
-			return [];
-		}
+		// Model discovery does not require a key: Synthetic's /models endpoint is
+		// public. Keeping discovery key-independent is important because VS Code
+		// only exposes a provider to the model picker (and to the agent-host BYOK
+		// bridge) once it has resolved at least one model for that vendor.
+		const apiKey = await this.ensureApiKey(secrets, true);
 
 		let models;
 		try {
@@ -304,33 +349,59 @@ export class SyntheticModelsService {
 		// Hydrate models in parallel for speed
 		const hydrationPromises = models.map(async (m) => {
 			try {
-				// Try to hydrate model information
-				const hydratedInfo = await this.hydrateModelId(m.id);
+				// Try to hydrate model information. Friendly aliases (syn:*, infinite:*)
+				// are not listed in models.dev, so fall back to their Hugging Face ID.
+				const hydratedInfo = await this.hydrateModelId(m.id, m.hugging_face_id);
 
 				// Use hydrated information if available, otherwise fall back to defaults
 				const modelInfo = { ...DEFAULT_MODEL_DETAILS, ...hydratedInfo };
 
-				const contextLen = modelInfo.maxInputTokens || DEFAULT_CONTEXT_LENGTH;
-				const maxOutput = modelInfo.maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS;
+				const contextLen = m.context_length ?? modelInfo.maxInputTokens ?? DEFAULT_CONTEXT_LENGTH;
+				const maxOutput = m.max_output_length ?? modelInfo.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
 
-				const supportsThinking = Boolean(
-					(modelInfo.capabilities as { supportsThinking?: boolean } | undefined)?.supportsThinking
-				);
+				// The Synthetic API is authoritative for capabilities. models.dev is a
+				// fallback for metadata that the Synthetic API does not expose, and may
+				// not know about newly added models at all.
+				const supportsTools = m.supported_features?.includes("tools") ?? Boolean(modelInfo.capabilities?.toolCalling);
+				const supportsImages = m.input_modalities?.includes("image") ?? Boolean(modelInfo.capabilities?.imageInput);
+				const supportsThinking =
+					m.supported_features?.includes("reasoning") === true ||
+					m.reasoning_parameters !== undefined ||
+					Boolean((modelInfo.capabilities as ExtendedCapabilities | undefined)?.supportsThinking);
+
 				const capabilitiesFinal: ExtendedCapabilities = {
-					toolCalling: modelInfo.capabilities?.toolCalling || false,
-					imageInput: modelInfo.capabilities?.imageInput || false,
+					toolCalling: supportsTools,
+					imageInput: supportsImages,
 					supportsThinking,
 				};
 
+				// Prefer the API's display name, then models.dev, then the raw id.
+				const apiDisplayName = m.display_name && m.display_name !== m.id ? m.display_name : undefined;
+				const hydratedName = modelInfo.name && modelInfo.name !== m.id ? modelInfo.name : undefined;
+				const friendlyName = apiDisplayName ?? hydratedName ?? m.display_name ?? m.name ?? m.id;
+
+				// Synthetic exposes both category aliases (syn:*, infinite:*) and the
+				// concrete hf:* models they route to. Both are useful, but they often
+				// share the same friendly name, which makes the picker look like it has
+				// duplicates. Keep aliases labelled by their unique id and explain the
+				// routing in the detail/tooltip; include the id in every detail so rows
+				// with the same display name can still be told apart.
+				const isCategoryAlias = m.id.startsWith("syn:") || m.id.startsWith("infinite:");
+				const displayName = isCategoryAlias ? m.id : friendlyName;
+				const tooltip = isCategoryAlias
+					? `${m.id} — Synthetic category alias for ${friendlyName}`
+					: friendlyName;
+				const detail = isCategoryAlias ? `Synthetic · routes to ${friendlyName}` : `Synthetic · ${m.id}`;
+
 				const modelInfo_final = {
 					id: m.id,
-					name: modelInfo.name || m.id,
-					tooltip: modelInfo.tooltip || "Synthetic",
-					detail: modelInfo.detail || "Synthetic.new",
+					name: displayName,
+					tooltip,
+					detail,
 					family: modelInfo.family || "synthetic",
 					version: modelInfo.version || "1.0.0",
-					maxInputTokens: contextLen,
-					maxOutputTokens: maxOutput,
+					maxInputTokens: contextLen || DEFAULT_CONTEXT_LENGTH,
+					maxOutputTokens: maxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
 					capabilities: capabilitiesFinal,
 				} satisfies LanguageModelChatInformation;
 

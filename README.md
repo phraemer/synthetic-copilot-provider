@@ -33,15 +33,26 @@ Use Synthetic to chat with thousands of open-weight [models](https://dev.synthet
     <img src="./assets/docs_model_list.png" width="500">
 
 
+## 🩺 Troubleshooting
+
+### Synthetic is missing from the model picker
+
+1. Make sure you are on a recent VS Code build and that the extension is enabled for the current window (it is enabled by default).
+2. Open the model picker and choose **Manage Models...**. Synthetic models are listed even before an API key is configured; VS Code prompts for the key the first time you send a request.
+3. If you use the **Agents window** with the Copilot harness, BYOK/extension-provided models are bridged into the agent host. Make sure `chat.agentHost.byokModels.enabled` is `true` (it is on by default in recent builds), then reload the window. In remote Copilot sessions (WSL, SSH, dev containers), extension-provided models are not supported by the agent host; use a local window instead.
+4. If models still do not appear, open **Help > Toggle Developer Tools** and check the console/Output for `[Synthetic Model Provider]` or `[LM]` messages.
+
+If the key was saved with an older extension ID (`Synthetic.synthetic-vscode-chat` rather than `SyntheticLab.synthetic-copilot-provider`), re-enter it with **Manage Synthetic Provider**.
+
 ## 🛠️ Development
 
 ```bash
-git clone https://github.com/synthetic-lab/synthetic-vscode-chat.git
+git clone https://github.com/synthetic-lab/synthetic-copilot-provider.git
 
-cd synthetic-vscode-chat
+cd synthetic-copilot-provider
 
 npm run package
 
 # Ctrl+Shift+P / Cmd+Shift+P > "Extensions: Install from VSIX" OR
-code --install-extension synthetic-vscode-chat.vsix
+code --install-extension synthetic-copilot-provider.vsix
 ```
