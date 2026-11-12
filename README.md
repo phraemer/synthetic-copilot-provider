@@ -56,3 +56,5 @@ npm run package
 # Ctrl+Shift+P / Cmd+Shift+P > "Extensions: Install from VSIX" OR
 code --install-extension synthetic-copilot-provider.vsix
 ```
+
+You can also build the VSIX from GitHub: open the **Actions** tab, select **Build VSIX**, and run the workflow. The packaged extension is uploaded as a workflow artifact.
