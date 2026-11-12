@@ -147,6 +147,86 @@ suite("Synthetic Chat Provider Extension", () => {
 			assert.strictEqual((result.messages![0] as any).tool_call_id, "call-123");
 		});
 
+		test("should preserve assistant tool calls with no text and resolve tool result names", () => {
+			const messages: vscode.LanguageModelChatRequestMessage[] = [
+				{
+					role: vscode.LanguageModelChatMessageRole.Assistant,
+					content: [new vscode.LanguageModelToolCallPart("call-kimi", "get_weather", { location: "Paris" })],
+					name: undefined
+				},
+				{
+					role: vscode.LanguageModelChatMessageRole.User,
+					content: [
+						new vscode.LanguageModelToolResultPart("call-kimi", [
+							new vscode.LanguageModelTextPart("Sunny")
+						])
+					],
+					name: undefined
+				}
+			];
+
+			const result = convertRequestToOpenAI(messages);
+
+			assert.strictEqual(result.messages!.length, 2, "Assistant tool call and tool result must both be preserved");
+			const assistantMessage = result.messages![0] as any;
+			assert.strictEqual(assistantMessage.role, "assistant");
+			assert.strictEqual(assistantMessage.content, null);
+			assert.strictEqual(assistantMessage.tool_calls.length, 1);
+			assert.strictEqual(assistantMessage.tool_calls[0].id, "call-kimi");
+			assert.strictEqual(assistantMessage.tool_calls[0].function.name, "get_weather");
+
+			const toolMessage = result.messages![1] as any;
+			assert.strictEqual(toolMessage.role, "tool");
+			assert.strictEqual(toolMessage.tool_call_id, "call-kimi");
+			assert.strictEqual(toolMessage.name, "get_weather");
+			assert.strictEqual(toolMessage.content, "Sunny");
+		});
+
+		test("should preserve empty tool results", () => {
+			const messages: vscode.LanguageModelChatRequestMessage[] = [
+				{
+					role: vscode.LanguageModelChatMessageRole.Assistant,
+					content: [new vscode.LanguageModelToolCallPart("call-empty", "get_status", {})],
+					name: undefined
+				},
+				{
+					role: vscode.LanguageModelChatMessageRole.User,
+					content: [
+						new vscode.LanguageModelToolResultPart("call-empty", [
+							new vscode.LanguageModelTextPart("")
+						])
+					],
+					name: undefined
+				}
+			];
+
+			const result = convertRequestToOpenAI(messages);
+			assert.strictEqual(result.messages!.length, 2);
+			const toolMessage = result.messages![1] as any;
+			assert.strictEqual(toolMessage.content, "");
+			assert.strictEqual(toolMessage.name, "get_status");
+		});
+
+		test("should convert every tool result in a message", () => {
+			const messages: vscode.LanguageModelChatRequestMessage[] = [
+				{
+					role: vscode.LanguageModelChatMessageRole.User,
+					content: [
+						new vscode.LanguageModelToolResultPart("call-one", [new vscode.LanguageModelTextPart("one")]),
+						new vscode.LanguageModelToolResultPart("call-two", [new vscode.LanguageModelTextPart("two")])
+					],
+					name: undefined
+				}
+			];
+
+			const result = convertRequestToOpenAI(messages);
+			assert.strictEqual(result.messages!.length, 2);
+			assert.strictEqual(result.messages![0].role, "tool");
+			assert.strictEqual(result.messages![0].content, "one");
+			assert.strictEqual(result.messages![1].role, "tool");
+			assert.strictEqual(result.messages![1].content, "two");
+		});
+
 		test("should handle multiple text parts", () => {
 			const messages: vscode.LanguageModelChatRequestMessage[] = [{
 				role: vscode.LanguageModelChatMessageRole.User,

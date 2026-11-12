@@ -32,6 +32,7 @@ export function convertRequestToOpenAI(
 	tools?: LanguageModelChatTool[]
 ): OpenAI.ChatCompletionCreateParamsStreaming {
 	const openaiMessages: OpenAI.ChatCompletionMessageParam[] = [];
+	const toolCallNames = new Map<string, string>();
 
 	for (const message of messages) {
 		// Convert role
@@ -50,14 +51,15 @@ export function convertRequestToOpenAI(
 		// Convert content
 		const contentParts: string[] = [];
 		const toolCalls: OpenAI.ChatCompletionMessageToolCall[] = [];
-		let toolCallId: string | undefined;
-		let toolResult: string | undefined;
+		const toolResults: Array<{ callId: string; content: string }> = [];
 
 		for (const part of message.content) {
 			if (part instanceof LanguageModelTextPart) {
 				contentParts.push(part.value);
 			} else if (part instanceof LanguageModelToolCallPart) {
-				// Convert tool call parts
+				// Convert tool call parts and remember their names for the matching
+				// tool results later in the conversation.
+				toolCallNames.set(part.callId, part.name);
 				toolCalls.push({
 					id: part.callId,
 					type: "function",
@@ -74,45 +76,42 @@ export function convertRequestToOpenAI(
 						toolResultContent.push(resultPart.value);
 					}
 				}
-				toolCallId = part.callId;
-				toolResult = toolResultContent.join("");
+				toolResults.push({ callId: part.callId, content: toolResultContent.join("") });
 			}
 		}
 
-		// Create the OpenAI message based on content type
-		if (contentParts.length > 0) {
-			const messageContent = contentParts.join("");
-
-			if (openaiRole === "assistant" && toolCalls.length > 0) {
-				// Assistant message with tool calls
-				openaiMessages.push({
-					role: openaiRole,
-					content: messageContent,
-					name: message.name || undefined,
-					tool_calls: toolCalls,
-				} as OpenAI.ChatCompletionAssistantMessageParam);
-			} else if (toolCallId && toolResult) {
-				// Tool result message
-				openaiMessages.push({
-					role: "tool",
-					content: toolResult,
-					tool_call_id: toolCallId,
-				} as OpenAI.ChatCompletionToolMessageParam);
-			} else {
-				// Standard message (user, assistant, or system)
-				openaiMessages.push({
-					role: openaiRole,
-					content: messageContent,
-					name: message.name || undefined,
-				});
-			}
-		} else if (toolCallId && toolResult) {
-			// Tool result message without text content
+		// An assistant message with tool calls must be preserved even when it has
+		// no text content. Dropping it leaves an orphan tool result, which Kimi
+		// rejects because it cannot resolve the tool name from a preceding call.
+		if (openaiRole === "assistant" && toolCalls.length > 0) {
 			openaiMessages.push({
+				role: "assistant",
+				content: contentParts.length > 0 ? contentParts.join("") : null,
+				name: message.name || undefined,
+				tool_calls: toolCalls,
+			} as OpenAI.ChatCompletionAssistantMessageParam);
+		} else if (contentParts.length > 0) {
+			// Standard message (user, assistant, or system)
+			openaiMessages.push({
+				role: openaiRole,
+				content: contentParts.join(""),
+				name: message.name || undefined,
+			});
+		}
+
+		for (const toolResult of toolResults) {
+			const toolMessage: OpenAI.ChatCompletionToolMessageParam & { name?: string } = {
 				role: "tool",
-				content: toolResult,
-				tool_call_id: toolCallId,
-			} as OpenAI.ChatCompletionToolMessageParam);
+				content: toolResult.content,
+				tool_call_id: toolResult.callId,
+			};
+			const toolName = toolCallNames.get(toolResult.callId);
+			if (toolName) {
+				// Kimi accepts either this explicit name or a matching preceding
+				// assistant tool_call. Supplying both is the most robust form.
+				toolMessage.name = toolName;
+			}
+			openaiMessages.push(toolMessage);
 		}
 	}
 
