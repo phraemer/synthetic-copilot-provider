@@ -4,8 +4,6 @@ export type ThinkSegment =
 
 const START_TAG = "<think>";
 const END_TAG = "</think>";
-const START_TAG_LENGTH = START_TAG.length;
-const END_TAG_LENGTH = END_TAG.length;
 
 export class ThinkTagParser {
 	private buffer = "";
@@ -23,7 +21,7 @@ export class ThinkTagParser {
 			if (this.mode === "text") {
 				const startIndex = this.buffer.indexOf(START_TAG);
 				if (startIndex === -1) {
-					const emitLength = this.safeEmitLength(START_TAG_LENGTH);
+					const emitLength = this.safeEmitLength(START_TAG);
 					if (emitLength === 0) {
 						break;
 					}
@@ -39,12 +37,12 @@ export class ThinkTagParser {
 				if (textBefore.length > 0) {
 					segments.push({ kind: "text", value: textBefore });
 				}
-				this.buffer = this.buffer.slice(startIndex + START_TAG_LENGTH);
+				this.buffer = this.buffer.slice(startIndex + START_TAG.length);
 				this.mode = "thinking";
 			} else {
 				const endIndex = this.buffer.indexOf(END_TAG);
 				if (endIndex === -1) {
-					const emitLength = this.safeEmitLength(END_TAG_LENGTH);
+					const emitLength = this.safeEmitLength(END_TAG);
 					if (emitLength === 0) {
 						break;
 					}
@@ -60,7 +58,7 @@ export class ThinkTagParser {
 				if (thinkingContent.length > 0) {
 					segments.push({ kind: "thinking", value: thinkingContent });
 				}
-				this.buffer = this.buffer.slice(endIndex + END_TAG_LENGTH);
+				this.buffer = this.buffer.slice(endIndex + END_TAG.length);
 				this.mode = "text";
 			}
 		}
@@ -78,11 +76,16 @@ export class ThinkTagParser {
 		return [segment];
 	}
 
-	private safeEmitLength(tagLength: number): number {
-		const minKeep = tagLength - 1;
-		if (this.buffer.length <= minKeep) {
-			return 0;
+	private safeEmitLength(tag: string): number {
+		// Only withhold a suffix that could actually be the start of the tag, so
+		// ordinary text is reported as it arrives instead of lagging behind by
+		// tag.length - 1 characters.
+		const maxHold = Math.min(tag.length - 1, this.buffer.length);
+		for (let hold = maxHold; hold > 0; hold--) {
+			if (this.buffer.endsWith(tag.slice(0, hold))) {
+				return this.buffer.length - hold;
+			}
 		}
-		return this.buffer.length - minKeep;
+		return this.buffer.length;
 	}
 }

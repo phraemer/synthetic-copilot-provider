@@ -1,5 +1,6 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
+import OpenAI from "openai";
 
 import { convertRequestToOpenAI } from "../utils";
 import { SyntheticChatModelProvider } from "../provider";
@@ -19,7 +20,67 @@ interface ConvertedMessage {
 
 suite("Synthetic Chat Provider Extension", () => {
 	suite("provider", () => {
+		test("reports buffered text before tool calls", async () => {
+			const openai = new OpenAI({ apiKey: "test-key" });
+			const completionsPrototype = Object.getPrototypeOf(openai.chat.completions) as object;
+			const originalCreate = Object.getOwnPropertyDescriptor(completionsPrototype, "create");
+			const provider = new SyntheticChatModelProvider(
+				{ get: async () => "test-key" } as unknown as vscode.SecretStorage,
+				"test-user-agent"
+			);
+			const emitted: Array<{ kind: "text" | "tool"; value: string }> = [];
 
+			Object.defineProperty(completionsPrototype, "create", {
+				configurable: true,
+				value: () => ({
+					async *[Symbol.asyncIterator]() {
+						yield { choices: [{ delta: { content: "before changing <thi" } }] };
+						yield {
+							choices: [{
+								delta: {
+									tool_calls: [{
+										index: 0,
+										id: "call-1",
+										type: "function",
+										function: { name: "read_file", arguments: "{}" }
+									}]
+								},
+								finish_reason: "tool_calls"
+							}]
+						};
+					}
+				})
+			});
+
+			try {
+				await provider.provideLanguageModelChatResponse(
+					{ id: "test-model" } as vscode.LanguageModelChatInformation,
+					[],
+					{ tools: [], toolMode: vscode.LanguageModelChatToolMode.Auto },
+					{
+						report: (part: vscode.LanguageModelResponsePart) => {
+							if (part instanceof vscode.LanguageModelTextPart && part.value.length > 0) {
+								emitted.push({ kind: "text", value: part.value });
+							} else if (part instanceof vscode.LanguageModelToolCallPart) {
+								emitted.push({ kind: "tool", value: part.name });
+							}
+						}
+					},
+					new vscode.CancellationTokenSource().token
+				);
+
+				assert.deepStrictEqual(emitted, [
+					{ kind: "text", value: "before changing " },
+					{ kind: "text", value: "<thi" },
+					{ kind: "tool", value: "read_file" }
+				]);
+			} finally {
+				provider.dispose();
+				if (originalCreate) {
+					Object.defineProperty(completionsPrototype, "create", originalCreate);
+				}
+			}
+		});
 	});
 
 		suite("convertRequest", () => {

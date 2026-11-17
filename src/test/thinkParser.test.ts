@@ -52,6 +52,61 @@ suite("ThinkTagParser", () => {
 			{ kind: "thinking", value: "Second" }
 		]);
 	});
+
+	test("reports text as it arrives instead of withholding a fixed lookahead", () => {
+		const parser = new ThinkTagParser();
+
+		const segments = parser.push("before changing anything.");
+
+		assert.deepStrictEqual(segments, [{ kind: "text", value: "before changing anything." }]);
+	});
+
+	test("leaves nothing buffered that could be reported after a tool call", () => {
+		const parser = new ThinkTagParser();
+
+		// Shape of a real streamed completion: narration split at arbitrary points,
+		// followed by a finish_reason chunk that carries the tool calls.
+		const chunks = [
+			"Let me verify the arithmetic and ",
+			"look at the callers and tests before ",
+			"changing anything.\n\n"
+		];
+
+		for (const chunk of chunks) {
+			const emitted = parser.push(chunk).map((segment) => segment.value).join("");
+			assert.strictEqual(emitted, chunk, "text must be reported as it arrives");
+		}
+
+		assert.deepStrictEqual(parser.flush(), [], "nothing may be left to report after the tool-call parts");
+	});
+
+	test("withholds only a suffix that could start a tag", () => {
+		const parser = new ThinkTagParser();
+
+		// Ordinary prose is emitted immediately; only the partial tag is held.
+		assert.deepStrictEqual(parser.push("Hello <thi"), [{ kind: "text", value: "Hello " }]);
+		assert.deepStrictEqual(parser.push("nk>hidden"), [{ kind: "thinking", value: "hidden" }]);
+
+		const textParser = new ThinkTagParser();
+		assert.deepStrictEqual(textParser.push("ordinary text "), [
+			{ kind: "text", value: "ordinary text " }
+		]);
+	});
+
+	test("flushes a genuinely incomplete tag", () => {
+		const parser = new ThinkTagParser();
+
+		assert.deepStrictEqual(parser.push("text <thi"), [{ kind: "text", value: "text " }]);
+		assert.deepStrictEqual(parser.flush(), [{ kind: "text", value: "<thi" }]);
+	});
+
+	test("streams thinking content without lookahead lag", () => {
+		const parser = new ThinkTagParser();
+
+		assert.deepStrictEqual(parser.push("<think>deep thoughts"), [
+			{ kind: "thinking", value: "deep thoughts" }
+		]);
+	});
 });
 
 function mergeSegments(segments: ThinkSegment[]): ThinkSegment[] {

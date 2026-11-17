@@ -222,6 +222,13 @@ export class SyntheticChatModelProvider implements LanguageModelChatProvider, vs
 
 				const finishReason = (choice as { finish_reason?: string }).finish_reason;
 				if (finishReason === "tool_calls") {
+					// Flush any buffered text/thinking before reporting the tool calls.
+					// Reporting the tool calls first would push the trailing characters of
+					// the narration below the tool block, visibly splitting the last word.
+					const pendingSegments = thinkParser.flush();
+					if (pendingSegments.length > 0) {
+						this.emitContentSegments(pendingSegments, progress);
+					}
 					for (const [index, state] of toolCallStates.entries()) {
 						emitToolCallIfReady(index, state);
 					}
